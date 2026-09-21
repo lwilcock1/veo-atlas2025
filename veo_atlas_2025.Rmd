@@ -1,0 +1,1080 @@
+---
+title: "2025 Veo Atlas"
+author: "lilz"
+date: "2026-01-03"
+output:  
+  html_document:
+    theme: flatly
+    toc: true
+    toc_float: true
+    toc_collapse: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(out.height=400, out.width=800, fig.width=6, fig.height=3,echo = TRUE)
+
+```
+
+# Veo Atlas for 2025
+
+First off, the GIS done on this project was not a lot. But over 80,000 trips in the CU market was a bit much for my poor laptop to handle and it took a very long time to do the little work that was done. 
+
+The analysis in ArcGIS Pro is outlined in a "Tasks" list. There is some pre-GIS editing that is in here. Be careful to not use run everything super fast. The reason for this is that R is SO much faster with larger datasets than Excel. 
+
+**Three Parts**
+*Part One*  
+
+* The data was minimally cleaned and is in this document. I found that R is 100 times faster due to the size of the dataset.
+
+*Part Two*
+* The data was put into GIS as points (and I made the lines based on XY data but didn't use it.) Some data was joined via selection and then calculator. The first of all rides that started (for the pickups) or ended (for the drop-offs) in Champaign. The second column was 'Special Areas'.
+  - Country Fair was made from the TIF district boundaries.
+  - Downtown was made from the 'Business District' boundary.
+  - Campus was the University property
+  - Campustown was the area south of University to the University property bounds.
+  - North of I-74 was made from the adopted (but retired and incorporated) plan boundaries of the Northwest Plan.
+
+*Part Three*
+* Then I made a series of spatial joins. There was two sets of spatial joins: data made, and then data found.
+  - Private property: this data came from whether the ride overlaps with the land use parcels and land use groups layer that was merged.
+  - ROW-Road: This was the pavement layer from Champaign PW. Wish Urbana and Savoy had this layer but they don't...
+  - ROW-Other: want to classify Champaign non-road/non-property areas. This would be sidewalk, grass, bus stop, and most common bike share bike pickup and drop-off area!
+  - Neighborhood (Small scaled): this is a neighborhood file that has 2023 Census information tied to it.
+
+
+
+## Packages
+
+Loading packages, set a theme, and some data.
+
+```{r packages, warning=FALSE, message=FALSE}
+
+library(tidyverse)
+library(readxl)
+library(showtext)
+font_add_google("Noto Serif")
+font_add_google("Noto Sans")
+showtext_auto()
+library(gt)
+library(gtExtras)
+library(paletteer)
+library(htmlwidgets)
+library(scales)
+#library(remotes)
+#remotes::install_github("hrbrmstr/waffle")
+library(waffle)
+# library(mapview)
+library(lubridate)
+
+
+```
+
+### Theme 
+
+```{r theme, warning=FALSE, message=FALSE}
+
+theme_lily <- function() {
+  theme_minimal() +
+  theme(text = element_text(family = "Noto Serif"),
+        axis.title = element_text(face = "bold", size = 8, hjust = 1),
+        axis.line.x.bottom = element_line(linewidth = 1),
+        panel.grid.major.y = element_line(colour = "ivory4", linetype = 3, linewidth = 0.5),
+        panel.grid.minor.x = element_blank(),
+        panel.grid.major.x = element_line(colour = "ivory4", linetype = 3, linewidth = 0.5),
+        panel.grid.minor.y = element_blank(),
+        panel.background = element_rect(fill = "transparent", color = NA),
+        plot.background = element_rect(fill = "transparent", color = NA),
+        legend.key = element_rect(fill = "transparent", color = NA),
+        legend.title = element_blank())
+}
+
+```
+
+# Pre-GIS Clean
+
+Excel is SOOOOO slow. I am going to get this read for GIS first. Due to size of the dataset I have the .csv raw data in two files. In GIS, this would quickly explode to four data files that all need individual spatial joins. Unacceptable. I will keep them separate until we are done with the data join and then I will merge the sets until there is two: one for pick-ups and one for dropoffs.
+
+This is the code below but, due to the size of the data set, the chunk will not run unless you delete the eval=FALSE part. Only do this if you need to redo the extensive GIS part with new data. 
+
+```{r pre-GIS clean, eval=FALSE}
+
+to_gis_jan_july <- read_csv("original data/IUC Jan_July_2025.csv")
+to_gis_aug_dec <- read_csv("original data/IUC Aug_Dec_2025.csv")
+
+#break the point column into two stats. Lat and long
+to_gis_jan_july2 <- to_gis_jan_july |> 
+  separate(col = ride_pickup_point,
+           into = c("pickup_long", "pickup_lat"),
+           sep = " ") |> 
+  separate(col = ride_dropoff_point,
+           into = c("dropoff_long", "dropoff_lat"),
+           sep = " ") |>
+  mutate(pickup_long = str_remove(pickup_long, "POINT\\(")) |> 
+  mutate(dropoff_long = str_remove(dropoff_long, "POINT\\(")) |> 
+  mutate(pickup_lat = str_remove(pickup_lat, "\\)")) |> 
+  mutate(dropoff_lat = str_remove(dropoff_lat, "\\)"))
+
+to_gis_aug_dec2 <- to_gis_aug_dec |> 
+  separate(col = ride_pickup_point,
+           into = c("pickup_long", "pickup_lat"),
+           sep = " ") |> 
+  separate(col = ride_dropoff_point,
+           into = c("dropoff_long", "dropoff_lat"),
+           sep = " ") |>
+  mutate(pickup_long = str_remove(pickup_long, "POINT\\(")) |> 
+  mutate(dropoff_long = str_remove(dropoff_long, "POINT\\(")) |> 
+  mutate(pickup_lat = str_remove(pickup_lat, "\\)")) |> 
+  mutate(dropoff_lat = str_remove(dropoff_lat, "\\)"))
+
+#Export
+write_excel_csv(to_gis_jan_july2, "jan_july_2025_XY.csv")
+write_excel_csv(to_gis_aug_dec2, "aug_dec_2025_XY.csv")
+  
+
+```
+
+WOW- That was so much faster than Excel! 
+
+
+## Loading data
+
+
+```{r}
+
+#This was exported from GIS.See notes above about the creation of the data in GIS.
+original_pickup <- read_xlsx("Dropoffs and Pickups with Data 2025.xlsx", sheet = "Pickups2025_allData")
+original_dropoffs <- read_xlsx("Dropoffs and Pickups with Data 2025.xlsx", sheet = "Dropoffs2025_allData")
+
+#Note: there are two less variables on dropoffs. They are:
+# - 
+# - 
+
+
+```
+
+# Champaign compared to the other communities
+Step one...make a chart for Pickups and Dropoffs.
+
+Step two...we are going to add pickup locations to dropoff locations to count them all evenly. This will create one top number rather than a top pickup and dropoff.
+
+```{r}
+#top pickup locations 2025
+Top_Pickup <- original_pickup |> 
+  group_by(`Municipality (Start)`) |> 
+  summarize(`Total Rides` = n()) |> 
+  mutate(Percent = (`Total Rides`/sum(`Total Rides`))) |> 
+  arrange(desc(`Total Rides`))
+
+top_pickup_tbl <- Top_Pickup |> 
+  gt() |> 
+  fmt_integer(column = "Total Rides", sep_mark = ",") |> 
+  sub_values(columns = "Municipality (Start)", values = NA, replacement = "County") |> 
+  cols_add(Bar = Percent*100, .after = Percent) %>%
+  fmt_percent(column = "Percent",
+              decimals = 1,
+              scale_values = TRUE) |> 
+  gt_plt_bar_pct(column = "Bar", 
+                 scaled = TRUE,
+                 fill = "#184860FF", 
+                 background = "#D8D8D8FF") |>
+  opt_table_font(font = "Noto Sans") |> 
+  tab_header(title = "2025 Top Municipalities by Pickup Location",) |> 
+  tab_style(style = cell_text(font = "Noto Serif", weight = 800, size = "big"),
+            locations = cells_title()) |> 
+  tab_style(style = cell_text(font = "Noto Sans", weight = 600, size = "small", transform = "uppercase"),
+            locations = cells_column_labels()) |> 
+  opt_align_table_header(align = "left")
+
+top_pickup_tbl
+
+Top_Dropoff <- original_dropoffs |> 
+  group_by(`Municipality (End)`) |> 
+  summarize(`Total Rides` = n()) |> 
+  mutate(Percent = (`Total Rides`/sum(`Total Rides`))) |> 
+  arrange(desc(`Total Rides`)) 
+
+top_dropoff_tbl <- Top_Dropoff |> 
+  gt() |> 
+  fmt_integer(column = "Total Rides", sep_mark = ",") |> 
+  sub_values(columns = "Municipality (End)", values = NA, replacement = "County") |> 
+  cols_add(Bar = Percent*100, .after = Percent) %>%
+  fmt_percent(column = "Percent",
+              decimals = 1,
+              scale_values = TRUE) |> 
+  gt_plt_bar_pct(column = "Bar", 
+                 scaled = TRUE,
+                 fill = "#184860FF", 
+                 background = "#D8D8D8FF") |>
+  opt_table_font(font = "Noto Sans") |> 
+  tab_header(title = "2025 Top Municipalities by Drop-off Location") |> 
+  tab_style(style = cell_text(font = "Noto Serif", weight = 800, size = "big"),
+            locations = cells_title()) |> 
+  tab_style(style = cell_text(font = "Noto Serif", weight = 600, size = "small", transform = "uppercase"),
+            locations = cells_column_labels()) |> 
+  opt_align_table_header(align = "left")
+
+top_dropoff_tbl
+
+total_trips <- original_pickup |> 
+  left_join(dplyr::select(original_dropoffs, OBJECTID, `Municipality (End)`), by = "OBJECTID") |> 
+  pivot_longer(cols = starts_with("Municipality"),
+               names_to = "Municipality Total") |> 
+  group_by(value) |> 
+  summarize(`Total Rides` = n()) |> 
+  mutate(`Percent` = (`Total Rides`/sum(`Total Rides`))) |> 
+  arrange(desc(`Total Rides`)) |> 
+  rename(Municipality = value)
+
+total_trips_tbl <- total_trips |> 
+  gt() |> 
+  fmt_integer(column = "Total Rides", sep_mark = ",") |> 
+  sub_values(columns = "Municipality", values = NA, replacement = "County") |> 
+  cols_add(Bar = Percent*100, .after = Percent) %>%
+  fmt_percent(column = "Percent",
+              decimals = 1,
+              scale_values = TRUE) |> 
+  gt_plt_bar_pct(column = "Bar", 
+                 scaled = TRUE,
+                 fill = "#184860FF", 
+                 background = "#D8D8D8FF") |>
+  opt_table_font(font = "Noto Sans") |> 
+  tab_header(title = "2025 Top Municipalities of Veo Rides") |> 
+  tab_style(style = cell_text(font = "Noto Serif", 
+                              weight = 800, 
+                              size = "big"),
+            locations = cells_title()) |> 
+  tab_style(style = cell_text(font = "Noto Serif", 
+                              weight = 600, 
+                              size = "small", 
+                              transform = "uppercase"),
+            locations = cells_column_labels()) |> 
+  opt_align_table_header(align = "left")
+
+total_trips_tbl
+
+```
+
+```{r eval=FALSE}
+
+gtsave(total_trips_tbl, "total muni rides.png", path = "G:/Transportation and Infrastructure/Bicycles/Bike Share/2026 Study Session and License/veo_atlas/outputs")
+
+
+```
+
+
+Rides that start in Champaign have amounted to a total ?? miles. Total miles in the C-U market for 2025 is ?.
+```{r}
+
+champaign_miles <- original_pickup |> 
+  filter(`Municipality (Start)` == "Champaign") |> 
+  select(1, 2, 8:10)
+
+sum(champaign_miles$`Ride Distance Miles`)
+# 529,435 miles in 2025
+
+sum(original_pickup$`Ride Distance Miles`)
+# 852,694 miles in 2025
+
+```
+What municipality has the longest average trip distance (my guess is Savoy and Champaign has the shortest)?
+```{r}
+
+average_municipality <- original_pickup |> 
+  group_by(`Municipality (Start)`) |> 
+  summarize(`Average Miles` = mean(`Ride Distance Miles`), `Total Miles` = sum(`Ride Distance Miles`), Rides = n()) |> 
+  arrange(`Average Miles`)
+
+avg_muni_tbl <- average_municipality |> 
+  gt() |> 
+  sub_values(columns = "Municipality (Start)", values = NA, replacement = "County") |> 
+  fmt_number(column = "Average Miles", decimals = 1) |> 
+  fmt_integer(columns = c("Total Miles", "Rides"), sep_mark = ",") |> 
+  opt_table_font(font = "Noto Sans") |> 
+  tab_header(title = "Average Trip Mileage by Municipality") |> 
+  tab_style(style = cell_text(font = "Noto Serif", weight = 800, size = "big"),
+            locations = cells_title()) |> 
+  opt_align_table_header(align = "left")
+  
+avg_muni_tbl
+
+  
+
+```
+
+```{r eval=FALSE}
+
+gtsave(avg_muni_tbl, "muni rides.png", path = "G:/Transportation and Infrastructure/Bicycles/Bike Share/2026 Study Session and License/veo_atlas/outputs")
+
+```
+
+
+## Top 10 Neighborhoods and Land Uses
+
+### Neighborhoods  
+
+Lets to a top neighborhoods for pickups AND dropoffs (total) and then put it into a chart. I only have neighborhood data for Champaign.
+
+```{r}
+
+total_neighborhood <- original_pickup |> 
+  select(1, 21) |> 
+  left_join(dplyr::select(original_dropoffs, OBJECTID, `Neighborhood Small (End)`), by = "OBJECTID") |> 
+  drop_na() |> # filters for only Champaign rides
+  pivot_longer(cols = starts_with("Neighborhood"),
+               names_to = "Neighborhood Total") |> 
+  group_by(value) |> 
+  summarize(`Total Rides` = n()) |> 
+  mutate(`Percent of Rides in Champaign` = (`Total Rides`/sum(`Total Rides`))) |> 
+  arrange(desc(`Total Rides`))
+
+champaign_only <- original_pickup |> 
+  filter(`Municipality (Start)` == "Champaign", `Neighborhood Small (Start)` != "NA") |> 
+  left_join(dplyr::select(original_dropoffs, OBJECTID, `Neighborhood Small (End)`), by = "OBJECTID") |> 
+  pivot_longer(cols = starts_with("Neighborhood"),
+               names_to = "Neighborhood Total") |> 
+  group_by(value) |> 
+  filter(value != "NA") |> 
+  summarize(`Total Rides` = n()) |> 
+  mutate(`Percent of Rides in Champaign` = (`Total Rides`/sum(`Total Rides`))) |> 
+  arrange(desc(`Total Rides`))
+
+u_only <- champaign_only |> 
+  filter(value == "University District")
+
+university_only_table <- champaign_only |> 
+  slice(-1) |> 
+  summarize(`All Other Champaign Trips` = sum(`Total Rides`)) |>
+  t() |> 
+  as.data.frame() |> 
+  tibble::rownames_to_column("value") |> 
+  rename(`Total Rides` = V1) |> 
+  mutate(`Percent of Rides in Champaign` = NA) |> 
+  rbind(u_only) |> 
+  arrange(desc(`Total Rides`)) |> 
+  mutate(Percent = (`Total Rides`/sum(`Total Rides`))) |> 
+  select(-`Percent of Rides in Champaign`) |> 
+  rename("Neighborhood" = value) |>
+  gt() |> 
+  cols_add(Bar = Percent*100, .after = Percent) %>%
+  fmt_integer(column = "Total Rides", sep_mark = ",") |> 
+  fmt_percent(column = "Percent",
+              decimals = 1,
+              scale_values = TRUE) |> 
+  gt_plt_bar_pct(column = "Bar", 
+                 scaled = TRUE,
+                 fill = "#184860FF", 
+                 background = "#D8D8D8FF") |>
+  opt_table_font(font = "Noto Serif") |> 
+  tab_header(title = "University District is No. 1 User of Bike Share") |> 
+  tab_style(style = cell_text(font = "Noto Serif", weight = 800, size = "big"),
+            locations = cells_title()) |> 
+  tab_style(style = cell_text(font = "Noto Serif", weight = 600, size = "small"),
+            locations = cells_column_labels())
+
+university_only_table
+
+#Table
+tbl_neighborhood <- total_neighborhood |> 
+  slice_head(n = 11) |> 
+  filter(value != "University District") |> 
+  rename("Neighborhood" = value) |> 
+  gt() |> 
+  fmt_integer(columns = "Total Rides", sep_mark = ",") |> 
+  cols_add(`Percent` = `Percent of Rides in Champaign`, .before = `Percent of Rides in Champaign`) %>% 
+  fmt_percent(columns = `Percent`,
+              decimals = 1,
+              scale_values = TRUE) |> 
+  gt_plt_bar_pct(column = `Percent of Rides in Champaign`, 
+                 scaled = FALSE,
+                 fill = "#184860FF", 
+                 background = "#D8D8D8FF") |>
+  opt_table_font(font = "Noto Serif") |> 
+  tab_header(title = "Next 10 Neighborhoods") |> 
+  tab_source_note(source_note = "Only representing Champaign Veo trips from 2025, amounting to about 50,600 trips.") |> 
+  tab_style(style = cell_text(font = "Noto Serif", weight = 800, size = "big"),
+            locations = cells_title()) |> 
+  tab_style(style = cell_text(font = "Noto Serif", weight = 600, size = "small"),
+            locations = cells_column_labels())
+
+tbl_neighborhood
+
+
+```
+
+```{r eval=FALSE}
+
+gtsave(university_only_table, "campus rides.png", path = "G:/Transportation and Infrastructure/Bicycles/Bike Share/2026 Study Session and License/veo_atlas/outputs")
+
+gtsave(tbl_neighborhood, "non campus rides.png", path = "G:/Transportation and Infrastructure/Bicycles/Bike Share/2026 Study Session and License/veo_atlas/outputs")
+
+
+```
+
+
+Downtown and its surrounding areas, as well as Research Park/East Downtown, and as far as Garden Hills and Hessel Park areas. 
+
+### Land Uses and Parking
+More striking is the land uses (if parked on private property)
+
+Let's talk parking and land use. I see SO many rides end and start at apartments. I am going to 
+
+```{r PARKING}
+#Parking first
+#Across the C-U Market
+
+park <- original_dropoffs |> 
+  select(1, 17, 19, 20) |> 
+  mutate(`Other ROW (End)` = case_when(`Other ROW (End)` == 'Yes' ~ 1)) |> 
+  mutate(`Private Property (End)` = case_when(`Private Property (End)` == 'Yes' ~ 1)) |> 
+  mutate(`Road ROW (End)` = case_when(`Road ROW (End)` == 'Yes' ~ 1)) |> 
+  summarize(`Parked on ROW - Other` = sum(`Other ROW (End)`, na.rm = TRUE), `Parked on ROW - Road` = sum(`Road ROW (End)`, na.rm = TRUE), `Parked on Private Property` = sum(`Private Property (End)`, na.rm = TRUE))
+
+parking_tbl <- park |> 
+  t() |> 
+  as.data.frame() |> 
+  tibble::rownames_to_column("Parking Location") |> 
+  rename(Trips = V1) |> 
+  arrange(desc(Trips)) |> 
+  gt() |> 
+  fmt_integer(columns = "Trips", sep_mark = ",") |> 
+  cols_add(Bar = Trips, .after = Trips) %>% 
+  gt_plt_bar(column = "Bar", 
+                 color = "#184860FF") |>
+  cols_label(Bar = "") |> 
+  opt_table_font(font = "Noto Sans") |> 
+  opt_align_table_header(align = "left") |> 
+  tab_header(title = "2025 Bike Share Parking Locations") |> 
+  tab_style(style = cell_text(font = "Noto Serif", weight = 800, size = "big"),
+            locations = cells_title()) |> 
+  tab_style(style = cell_text(font = "Noto Serif", weight = 600, size = "small", transform = "uppercase"),
+            locations = cells_column_labels())
+  
+parking_tbl
+
+```
+
+
+```{r eval=FALSE}
+
+gtsave(parking_tbl, "parking.png", path = "G:/Transportation and Infrastructure/Bicycles/Bike Share/2026 Study Session and License/veo_atlas/outputs")
+
+```
+
+
+If the bike was parked on private property, what was the top land uses?
+
+Let's simplify land use to the first digit.
+
+```{r}
+
+lu_color <- c('Residential' = '#FFCC00', 'Commercial' = '#FF3333', 'Industrial' = '#9966FF', 'Institutional' = 'deepskyblue3', 'Open Space' = 'seagreen', 'Parking or Utility' = 'gray65', 'Vacant Land' = 'lemonchiffon4')
+
+land_count <- original_pickup %>% 
+  filter(`Private Property (Start)` == "Yes") |> 
+  select(1, 9, 10:16) |> 
+  rename(code = `Land Use Code (Start)`) |> 
+  mutate(Land_Use = as.factor(case_when(code >= 2000 & code < 3000 ~ "Residential",
+                              code >= 3000 & code < 4000 ~ "Commercial",
+                              code >= 4000 & code < 5000 ~ "Industrial",
+                              code >= 5000 & code < 6000 ~ "Institutional",
+                              code >= 6000 & code < 7000 ~ "Parking or Utility",
+                              code >= 7000 & code < 8000 ~ "Open Space",
+                              code >= 8000 & code < 9000 ~ "Vacant Land"))) |>  
+  relocate(Land_Use, .before = "Municipality (Start)") |> 
+  group_by(Land_Use) |> 
+  count(Land_Use) |> 
+  rename(Trips_Ended = n) |> 
+  filter(Land_Use != "NA") |> 
+  arrange(desc(Trips_Ended))
+
+
+bar_lu <- land_count %>% 
+  ggplot(aes(x= reorder(Land_Use, -Trips_Ended), y = Trips_Ended, fill = Land_Use)) +
+  geom_bar(position = "dodge", stat = "identity") + 
+  scale_fill_manual(values = lu_color) + 
+  scale_y_continuous(labels = scales::label_comma()) +
+  scale_x_discrete(labels = label_wrap_gen(width = 10, multi_line = TRUE)) +
+  labs(title = "Land Uses that Utilize Bike Share",
+       caption = "Trips from 2025. Noted if bike parked on private property.",
+       x = "Types of Land Uses",
+       y = "Number of Trips") + 
+  geom_text(aes(label = scales::comma(Trips_Ended)),
+            color = "black",
+            vjust = -0.5,
+            size = 3,
+            fontface = "bold") +
+  theme_lily() +
+  theme(plot.caption = element_text(hjust = 0,
+                                    face = "italic"),
+        axis.text.x = element_text(angle = 0, 
+                                   hjust = 0.5),
+        legend.position = "bottom")
+
+bar_lu
+
+```
+
+Let's remove Campus and Campustown....
+
+```{r}
+
+land_count_no_campus <- original_pickup %>% 
+  left_join(original_dropoffs, by = "OBJECTID") |> 
+  filter(`Private Property (Start)` == "Yes") |> 
+  filter(is.na(`Special District (Start)`) | `Special District (Start)` != "Campus" & `Special District (Start)` != "Campustown") |> 
+  select(1, 9, 10:16, 66:76) |> 
+  rename(code = `Land Use Code (Start)`, code2 = `Land Use Code (End)`) |> 
+  mutate(Land_Use = as.factor(case_when(code >= 2000 & code < 3000 ~ "Residential",
+                              code >= 3000 & code < 4000 ~ "Commercial",
+                              code >= 4000 & code < 5000 ~ "Industrial",
+                              code >= 5000 & code < 6000 ~ "Institutional",
+                              code >= 6000 & code < 7000 ~ "Parking or Utility",
+                              code >= 7000 & code < 8000 ~ "Open Space",
+                              code >= 8000 & code < 9000 ~ "Vacant Land"))) %>% 
+    mutate(Land_Use2 = as.factor(case_when(code2 >= 2000 & code2 < 3000 ~ "Residential",
+                              code2 >= 3000 & code2 < 4000 ~ "Commercial",
+                              code2 >= 4000 & code2 < 5000 ~ "Industrial",
+                              code2 >= 5000 & code2 < 6000 ~ "Institutional",
+                              code2 >= 6000 & code2 < 7000 ~ "Parking or Utility",
+                              code2 >= 7000 & code2 < 8000 ~ "Open Space",
+                              code2 >= 8000 & code2 < 9000 ~ "Vacant Land"))) %>% 
+  relocate(Land_Use, Land_Use2, .before = "Municipality (Start)") |> 
+  select(1:3) |> 
+  pivot_longer(c(Land_Use, Land_Use2), names_to = "PickupDropoff", values_to = "Land_Use") |> 
+  group_by(Land_Use) |> 
+  count(Land_Use) |> 
+  rename(Trips_Ended = n) |> 
+  filter(Land_Use != "NA") |> 
+  arrange(desc(Trips_Ended))
+
+bar_lu_no_campus <- land_count_no_campus %>% 
+  ggplot(aes(x= reorder(Land_Use, -Trips_Ended), y = Trips_Ended, fill = Land_Use)) +
+  geom_bar(position = "dodge", stat = "identity") + 
+  scale_fill_manual(values = lu_color) + 
+  scale_y_continuous(labels = scales::label_comma()) +
+  scale_x_discrete(labels = label_wrap_gen(width = 10, multi_line = TRUE)) +
+  labs(title = "Outside of Campus- Land Uses that Utilize Bike Share",
+       x = "Types of Land Uses",
+       y = "Number of Trips") + 
+  geom_text(aes(label = scales::comma(Trips_Ended)),
+            color = "black",
+            vjust = -0.5,
+            size = 3,
+            fontface = "bold") +
+  theme_lily() +
+  theme(plot.caption = element_text(hjust = 0,
+                                    face = "italic"),
+        axis.text.x = element_text(angle = 0, 
+                                   hjust = 0.5),
+        legend.position = "none")
+
+bar_lu_no_campus
+
+```
+
+
+Clearly destinations! See a friend at their home or a business, go to work or home, etc. 
+
+What kind of residential and commerical? 
+Let's head back to codes and make some wafflecharts to show the types of residential. Waffle charts being squares feels like a really good 
+
+```{r Waffle Data}
+
+# waffles need a very simple data structure to map! Pretty fun. 
+
+waffle_res <- original_pickup |>
+  left_join(original_dropoffs, by = "OBJECTID") |> 
+  rename(code = `Land Use Code (Start)`, code2 = `Land Use Code (End)`) |> 
+  select(1, 12, 17, 68, 73) |> 
+  filter(`Private Property (Start)` == "Yes" | `Private Property (End)` == "Yes") |> 
+  pivot_longer(c(code, code2), names_to = "PickupDropoff", values_to = "Land_Use") |> 
+  select(1, 5) |> 
+  filter(Land_Use != "NULL")
+
+# Some of the codes have more than one code and they are separate by comma. Let's preserve them and clean them separately and combine. 
+
+waffle_res_removed <- waffle_res |> 
+  filter((nchar(Land_Use) > 4)) |> 
+  separate_longer_delim(cols = Land_Use,
+                        delim = ",") |> 
+  filter(Land_Use != "NULL")
+  
+waffle_res2 <- waffle_res |> 
+  filter(!(nchar(Land_Use) > 4)) |>
+  rbind(waffle_res_removed) |> 
+  mutate(Land_Use = as.numeric(Land_Use)) |> 
+  filter(Land_Use >= 2000, Land_Use < 3000) |> 
+  group_by(Land_Use) |> 
+  count(Land_Use) |> 
+  rename(Trips = n) |> 
+  filter(Land_Use != "NA") |> 
+  arrange(desc(Trips)) |> 
+  mutate(Land_Use_Label = as.factor(case_when(Land_Use == 2100 ~ "Detached Residential",
+                              Land_Use == 2200 ~ "Attached Residential",
+                              Land_Use == 2300 ~ "Multifamily Residential",
+                              Land_Use == 2310 ~ "Multifamily Residential Conversion",
+                              Land_Use == 2400 ~ "Group Residential",
+                              Land_Use == 2500 ~ "Mobile Home"))) |> 
+  ungroup()
+
+#upon seeing the results, I need to combine multifamily conversion. This is just planning jargon.
+
+combine_res <- waffle_res2 |> 
+  filter(Land_Use %in% c(2300, 2310)) |> 
+  summarize(Land_Use = 2300, 
+            Trips = sum(Trips),
+            Land_Use_Label = "Multifamily Residential") |> 
+  group_by(Land_Use, Land_Use_Label) |> 
+  summarize(Trips = sum(Trips)) |> 
+  ungroup()
+
+waffle_res3 <- waffle_res2 |> 
+  filter(Land_Use != 2310, Land_Use != 2300) |> 
+  bind_rows(combine_res) |> 
+  arrange(desc(Trips))
+  
+
+```
+
+
+Time to make the waffle! It is basically a glorified pie chart but I really don't like pie charts.For reasons that the waffle does not solve. 
+
+```{r Waffle Making}
+
+res_color <- c('Detached Residential' = '#ffd75b', 'Attached Residential' = '#e71d36', 'Multifamily Residential' = '#c44d00', 'Multifamily Residential Conversion' = '#000000', 'Group Residential' = '#539987', 'Mobile Home' = '#043')
+
+res_waffle <- waffle_res3 |> 
+  ggplot(aes(fill = Land_Use_Label, values = Trips)) +
+  geom_waffle(nrows = 100, size = 0.2, make_proportional = TRUE, color = "white", flip = TRUE) +
+  scale_fill_manual(values = res_color) + 
+  labs(title = "Bike Share Parked on Different Kinds of Residential Property") + 
+  theme_lily() + 
+  theme_enhance_waffle() + 
+  theme(panel.grid.major.x = element_blank(),
+        panel.grid.major.y = element_blank(),
+        legend.position = "bottom",
+        legend.box = "horizontal") + 
+  guides(fill = guide_legend(nrow = 2, 
+                             byrow = TRUE,
+                             label.hjust = 0,
+                             label.str_wrap = 15))
+
+res_waffle
+
+waffle_tbl <- waffle_res2 |> 
+  rename(`Land Use` = Land_Use_Label) |> 
+  ungroup() |> 
+  mutate(Percent = (Trips/sum(Trips))*100) |> 
+  select(!Land_Use) |> 
+  relocate(`Land Use`, .before = Trips) |> 
+  gt() |> 
+  fmt_integer(columns = "Trips", sep_mark = ",") |> 
+  cols_add(Bar = Percent, .after = Percent) |> 
+  fmt_percent(columns = Percent,
+              decimals = 1,
+              scale_values = FALSE) |> 
+  gt_plt_bar_pct(column = Bar, 
+                 scaled = TRUE,
+                 fill = "#184860FF", 
+                 background = "#D8D8D8FF") |>
+  opt_table_font(font = "Noto Serif") |> 
+  tab_header(title = "2025 Veo Parking on Residential Property by Type") |> 
+  tab_style(style = cell_text(font = "Noto Serif", weight = 800, size = "big"),
+            locations = cells_title()) |> 
+  tab_style(style = cell_text(font = "Noto Serif", weight = 600, size = "small"),
+            locations = cells_column_labels()) |> 
+  tab_options(table.background.color = "transparent",
+              heading.background.color = "transparent",
+              column_labels.background.color = "transparent")
+
+waffle_tbl
+
+```
+
+
+```{r eval=FALSE}
+
+gtsave(waffle_tbl, "residential types parking.png", path = "G:/Transportation and Infrastructure/Bicycles/Bike Share/2026 Study Session and License/veo_atlas/outputs")
+
+```
+
+
+Very multifamily. 
+
+
+# Over time...
+
+We need to update the totals for the year and then provide peak time charts for the Special Districts. 
+
+## Annual Number Updates
+
+Last year I created charts in Posit Cloud. This year, I am moving everything to this Desktop project. 
+
+```{r}
+
+#old data
+veo <- read_xlsx("VeoRides.xlsx")
+
+#Add up the 2025 numbers!! 
+#2025 miles ridden
+sum(original_dropoffs$`Ride Distance Miles`)
+# 852694.1
+
+#2025 rides is literally just observations from the OG dataset
+# 457,356
+
+#2025 rides outside of campus and campustown in Champaign
+number_rides <- original_pickup |> 
+  left_join(original_dropoffs, by = "OBJECTID") |>
+  filter(`Municipality (Start)` == "Champaign" | `Municipality (End)` == "Champaign") |> 
+  dplyr::select(1, 9, 10, 65, 66) |> 
+  filter(is.na(`Special District (Start)`) | is.na(`Special District (End)`) & `Special District (Start)` != "Campus" & `Special District (Start)` != "Campustown" & `Special District (End)` != "Campus" & `Special District (End)` != "Campustown") |> 
+  pivot_longer(c(`Special District (Start)`, `Special District (End)`), names_to = "Champaign_not_Campus", values_to = "Rides") |> 
+  count(Rides)
+
+sum(number_rides$n)
+# 164,150
+
+#2025 rides in Champaign in campus and campustown only
+
+number_rides_campus <- original_pickup |> 
+  left_join(original_dropoffs, by = "OBJECTID") |>
+  filter(`Municipality (Start)` == "Champaign" | `Municipality (End)` == "Champaign") |> 
+  dplyr::select(1, 9, 10, 65, 66) |> 
+  filter(`Special District (Start)` == "Campustown" | `Special District (Start)` == "Campus" | `Special District (End)` == "Campus" | `Special District (End)` == "Campustown") |> 
+  pivot_longer(c(`Special District (Start)`, `Special District (End)`), names_to = "Champaign_Campus", values_to = "Rides") |> 
+  count(Rides)
+
+sum(number_rides_campus$n)
+# 541,152
+
+veo <- add_row(veo, Year = 2025, `Miles Ridden` = 852694.1, `Number of Rides` = 457356, `Unique Riders` = NA, `Average Deployment` = 911, `Number of Rides Champaign Off-Campus` = 164150, `Number of Rides in Champaign with no campus` = 541152)
+
+
+# Rides per vehicle per day 1.39 AMAZING! 
+# Average distance 1.3 miles per trip
+# Veo plus $10, 132,646 trips, 3,246 people Veo Plus
+# Veo Commuter service, monthly fee, two rides that 
+# 
+
+
+```
+
+
+Miles Ridden and Number of Rides line charts
+
+```{r}
+
+ridden_chart <- veo |> 
+  select(1,2) |>
+  rename(Miles = `Miles Ridden`) |> 
+  ggplot(aes(x = Year, y = Miles)) +
+  geom_line(linewidth = 1) + 
+  geom_point() +
+  labs(title = "Annual Miles Ridden") +
+  scale_y_continuous(labels = scales::label_comma()) +
+  theme_lily()
+
+ridden_chart
+
+```
+
+
+```{r}
+
+
+num_rides_chart <- veo |> 
+  select(1,3) |>
+  ggplot(aes(x = Year, y = `Number of Rides`)) +
+  geom_line(linewidth = 1) + 
+  geom_point() +
+  labs(title = "Annual Number of Rides") +
+  scale_y_continuous(labels = scales::label_comma()) +
+  theme_lily()
+
+num_rides_chart
+
+
+```
+
+
+In order to save some space on the attachments, I am going to smash these two line charts together. There is a coefficient of 2 for the axises. 
+
+```{r}
+coeff <- 2
+
+
+update_annual_chart <- veo |> 
+  select(1,2,3) |>
+  rename(Miles = `Miles Ridden`) |> 
+  ggplot(aes(x = Year)) +
+  geom_line(aes(y = Miles), linewidth = 1, color = "#0A94B7") + 
+  geom_point(aes(y = Miles), size = 1, color = "#0A94B7") + 
+  geom_line(aes(y = `Number of Rides` * coeff), linewidth = 1, color = "#344") +
+  geom_point(aes(y = `Number of Rides` * coeff), size = 1, color = "#344") +
+  annotate("text", x = 2020, y = 500000, label = "Rides", color = "#344", family = "Noto Serif", fontface = "bold", size = 4) + 
+  annotate("text", x = 2024, y = 150000, label = "Miles", color = "#0A94B7", family = "Noto Serif", fontface = "bold", size = 4) + 
+  labs(title = "Annual Rides and Miles in CU Market") +
+  scale_y_continuous(name = "Miles", 
+                     labels = scales::label_comma(),
+                     sec.axis = sec_axis(~. / coeff, name = "Rides", labels = scales::label_comma())) +
+  theme_lily() + 
+  theme(axis.title.y.right = element_text(size = 11, color = "#344", hjust = 0),
+        axis.title.y.left = element_text(size = 11, color = "#0A94B7"),
+        plot.title = element_text(size = 16))
+
+update_annual_chart
+
+ggsave("Annual Rides and Miles.png", plot = update_annual_chart, units = "in", width = 7.5, height = 4, path = "G:/Transportation and Infrastructure/Bicycles/Bike Share/2026 Study Session and License/veo_atlas/outputs", device = "png")
+
+ggsave("Annual Rides and Miles.svg", plot = update_annual_chart, units = "in", width = 7.5, height = 4, path = "G:/Transportation and Infrastructure/Bicycles/Bike Share/2026 Study Session and License/veo_atlas/outputs", device = "svg")
+
+```
+
+
+
+Great! 
+
+## Special Districts and Peak Rides
+
+### Country Fair
+
+```{r}
+
+country_fair <- original_dropoffs |> 
+  select(1,2,8:10, 17:57) |> 
+  filter(`Special District (End)` == "Country Fair")
+
+#peak times of the year
+country_fair_year <- country_fair |> 
+  separate_wider_delim(col = `Ride Start Date`,
+                       names = c("date", "time"),
+                       delim = " ") |> 
+  drop_na(date) |> 
+  mutate(date2 = ymd(date)) |> 
+  mutate(time2 = hms(time))
+
+
+#peak times of the year
+cf_day_chart <- country_fair_year |>
+  select(1,3,48,49) |> 
+  group_by(date2) |> 
+  summarize(Trips = n(), .groups = 'drop') |> 
+  mutate(date_POSIX = as.POSIXct(date2, format = "%Y-%m-%d"), .before = Trips) |> 
+  ggplot(aes(x = date_POSIX, y = Trips, group = 1)) +
+  geom_line(color = "#344", alpha = 0.5) +
+  geom_smooth(color = "#344", fill = "#344") + 
+  labs(x = "2025 Dates",
+       y = "Number of Trips") + 
+  theme_lily() +
+  scale_x_datetime(date_breaks = "2 month", date_labels = "%B")
+
+
+cf_day_chart
+ 
+# peak times of the day
+
+cf_hour_chart <- country_fair_year |>
+  select(1,3,48,49) |> 
+  mutate(hour = hour(time2)) |> 
+  group_by(hour) |> 
+  summarize(Trips = n(), .groups = 'drop') |> 
+  mutate(hour_factor = as.factor(hour), .before = Trips) |> 
+  arrange(hour_factor) |> 
+  ggplot(aes(x = hour_factor, y = Trips, group = 1)) +
+  geom_line(color = "#344", linewidth = 1) +
+  labs(x = "Hours of the Day",
+       y = "Number of Trips") + 
+  theme_lily() +
+  scale_x_discrete(limits = as.character(0:23), breaks = c("0", "6", "12", "18"), labels = c("12 AM", "6 AM", "12 PM", "6 PM"))
+
+
+cf_hour_chart
+
+  
+```
+
+### Campus and Campustown
+
+```{r}
+
+ccp <- original_dropoffs |> 
+  select(1,2,8:10, 17:57) |> 
+  filter(`Special District (End)` == "Campus" | `Special District (End)`== "Campustown")
+
+#peak times of the year
+ccp_year <- ccp |> 
+  separate_wider_delim(col = `Ride Start Date`,
+                       names = c("date", "time"),
+                       delim = " ",
+                       too_few = "align_start") |> 
+  drop_na(date) |> 
+  mutate(date2 = ymd(date)) |> 
+  mutate(time2 = hms(time))
+
+
+#peak times of the year
+ccp_day_chart <- ccp_year |>
+  select(1,3,48,49) |> 
+  group_by(date2) |> 
+  summarize(Trips = n(), .groups = 'drop') |> 
+  mutate(date_POSIX = as.POSIXct(date2, format = "%Y-%m-%d"), .before = Trips) |> 
+  ggplot(aes(x = date_POSIX, y = Trips, group = 1)) +
+  geom_line(color = "#344", alpha = 0.5) +
+  geom_smooth(color = "#344", fill = "#344") + 
+  labs(x = "2025 Dates",
+       y = "Number of Trips") + 
+  theme_lily() +
+  scale_x_datetime(date_breaks = "2 month", date_labels = "%B")
+
+
+ccp_day_chart
+ 
+# peak times of the day  
+
+
+ccp_hour_chart <- ccp_year |>
+  select(1,3,48,49) |> 
+  mutate(hour = hour(time2)) |> 
+  group_by(hour) |> 
+  summarize(Trips = n(), .groups = 'drop') |> 
+  mutate(hour_factor = as.factor(hour), .before = Trips) |> 
+  arrange(hour_factor) |> 
+  ggplot(aes(x = hour_factor, y = Trips, group = 1)) +
+  geom_line(color = "#344", linewidth = 1) +
+  labs(x = "Hours of the Day",
+       y = "Number of Trips") + 
+  theme_lily() +
+  scale_x_discrete(limits = as.character(0:23), breaks = c("0", "6", "12", "18"), labels = c("12 AM", "6 AM", "12 PM", "6 PM"))
+
+
+ccp_hour_chart
+
+
+```
+
+### Downtown
+
+```{r}
+
+dtown <- original_dropoffs |> 
+  select(1,2,8:10, 17:57) |> 
+  filter(`Special District (End)` == "Downtown")
+
+#peak times of the year
+dtown_year <- dtown |> 
+  separate_wider_delim(col = `Ride Start Date`,
+                       names = c("date", "time"),
+                       delim = " ",
+                       too_few = "align_start") |> 
+  drop_na(date) |> 
+  mutate(date2 = ymd(date)) |> 
+  mutate(time2 = hms(time))
+
+
+#peak times of the year
+dtown_day_chart <- dtown_year |>
+  select(1,3,48,49) |> 
+  group_by(date2) |> 
+  summarize(Trips = n(), .groups = 'drop') |> 
+  mutate(date_POSIX = as.POSIXct(date2, format = "%Y-%m-%d"), .before = Trips) |> 
+  ggplot(aes(x = date_POSIX, y = Trips, group = 1)) +
+  geom_line(color = "#344", alpha = 0.5) +
+  geom_smooth(color = "#344", fill = "#344") + 
+  labs(x = "2025 Dates",
+       y = "Number of Trips") + 
+  theme_lily() +
+  scale_x_datetime(date_breaks = "2 month", date_labels = "%B")
+
+
+dtown_day_chart
+ 
+# peak times of the day  
+
+
+dtown_hour_chart <- dtown_year |>
+  select(1,3,48,49) |> 
+  mutate(hour = hour(time2)) |> 
+  group_by(hour) |> 
+  summarize(Trips = n(), .groups = 'drop') |> 
+  mutate(hour_factor = as.factor(hour), .before = Trips) |> 
+  arrange(hour_factor) |> 
+  ggplot(aes(x = hour_factor, y = Trips, group = 1)) +
+  geom_line(color = "#344", linewidth = 1) +
+  labs(x = "Hours of the Day",
+       y = "Number of Trips") + 
+  theme_lily() +
+  scale_x_discrete(limits = as.character(0:23), breaks = c("0", "6", "12", "18"), labels = c("12 AM", "6 AM", "12 PM", "6 PM"))
+
+
+dtown_hour_chart
+
+```
+
+### North of I-74
+
+```{r}
+
+nI74 <- original_dropoffs |> 
+  select(1,2,8:10, 17:57) |> 
+  filter(`Special District (End)` == "North of I-74")
+
+#peak times of the year
+nI74_year <- nI74 |> 
+  separate_wider_delim(col = `Ride Start Date`,
+                       names = c("date", "time"),
+                       delim = " ",
+                       too_few = "align_start") |> 
+  drop_na(date) |> 
+  mutate(date2 = ymd(date)) |> 
+  mutate(time2 = hms(time))
+
+
+#peak times of the year
+nI74_day_chart <- nI74_year |>
+  select(1,3,48,49) |> 
+  group_by(date2) |> 
+  summarize(Trips = n(), .groups = 'drop') |> 
+  mutate(date_POSIX = as.POSIXct(date2, format = "%Y-%m-%d"), .before = Trips) |> 
+  ggplot(aes(x = date_POSIX, y = Trips, group = 1)) +
+  geom_line(color = "#344", alpha = 0.5) +
+  geom_smooth(color = "#344", fill = "#344") + 
+  labs(x = "2025 Dates",
+       y = "Number of Trips") + 
+  theme_lily() +
+  scale_x_datetime(date_breaks = "2 month", date_labels = "%B")
+
+
+nI74_day_chart
+ 
+# peak times of the day  
+
+
+nI74_hour_chart <- nI74_year |>
+  select(1,3,48,49) |> 
+  mutate(hour = hour(time2)) |> 
+  group_by(hour) |> 
+  summarize(Trips = n(), .groups = 'drop') |> 
+  mutate(hour_factor = as.factor(hour), .before = Trips) |> 
+  arrange(hour_factor) |> 
+  ggplot(aes(x = hour_factor, y = Trips, group = 1)) +
+  geom_line(color = "#344", linewidth = 1) +
+  labs(x = "Hours of the Day",
+       y = "Number of Trips") + 
+  theme_lily() +
+  scale_x_discrete(limits = as.character(0:23), breaks = c("0", "6", "12", "18"), labels = c("12 AM", "6 AM", "12 PM", "6 PM"))
+
+
+nI74_hour_chart
+
+```
+
+
+
+
+
+
+
+
+
+
